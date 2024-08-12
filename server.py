@@ -1,38 +1,65 @@
+import asyncio
+import json
+import threading
+
+import numpy as np
+import websockets
+from RealtimeSTT import AudioToTextRecorder
+from scipy.signal import resample
+import torch
+from TTS.api import TTS
+from groq import Groq
+from groq.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+import os
+import base64
+import re
+import uuid
+
+
+def strip_markdown_and_special_chars(text):
+    # First, strip markdown links and formatting
+    text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)  # Removes markdown links
+    text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)  # Removes inline code blocks
+    text = re.sub(r"\*\*(.*?)\*\*|\*(.*?)\*", r"\1\2", text)  # Removes bold and italics
+    text = re.sub(r"#+ ", "", text)  # Removes headers
+
+    #  remove any characters that are not alphanumeric, whitespace, or punctuation
+    text = re.sub(r'[^a-zA-Z0-9\s.,!?\'"(){}[\]:;-]', "", text)
+
+    return text
+
+
+def GetUUID():
+    return str(uuid.uuid4())
+
+
 if __name__ == "__main__":
+
     print("Starting server, please wait...")
-
-    import asyncio
-    import json
-    import threading
-
-    import numpy as np
-    import websockets
-    from RealtimeSTT import AudioToTextRecorder
-    from scipy.signal import resample
-    import torch
-    from TTS.api import TTS
-    from groq import Groq
-    from groq.types.chat.chat_completion_message_param import ChatCompletionMessageParam
-    import os
 
     # Get device
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # List available 🐸TTS models
-    print(TTS().list_models())
+    # print(TTS().list_models())
 
     # Init TTS
-    # tts = TTS("vocoder_models/en/sam/hifigan_v2").to(device)
     tts = TTS("tts_models/en/vctk/vits").to(device)
 
     recorder = None
     recorder_ready = threading.Event()
     client_websocket = None
+    current_uuid = GetUUID()
 
     history: list[ChatCompletionMessageParam] = [
         {
             "role": "system",
-            "content": "You are a helpful assistant. Keep your responses as short and concise as possible.",
+            "content": """
+                You are a helpful chatbot.
+                Keep your responses as short and concise as possible.
+                Your responses will be used in text to speech pipeline,
+                so respond in plain text with punctuations and no extra formatting.
+                Respond with a single sentence when possible.""",
         },
     ]
 
@@ -107,22 +134,29 @@ if __name__ == "__main__":
                     )
                     continue
 
+                llm_response = chat_completion.choices[0].message.content
+
                 history.append(
                     {
                         "role": "assistant",
-                        "content": chat_completion.choices[0].message.content,
+                        "content": llm_response,
                     }
                 )
 
+                # strip any markdown formatting, only keep alphanumeric characters, whitespaces, and punctuations
+                llm_response = strip_markdown_and_special_chars(llm_response)
+
                 print("Starting TTS...")
                 tts.tts_to_file(
-                    # speaker="Suad Qasim",
-                    # speed=0.2,
-                    # language="ar",
-                    text=chat_completion.choices[0].message.content,
-                    file_path=f"wav/{len(history)}.wav",
+                    text=llm_response,
+                    file_path="wav/audio.wav",
                     speaker="p287",
                 )
+
+                # read wav file and convert to base64 to send over websocket
+                wav_base64 = base64.b64encode(
+                    open("wav/audio.wav", "rb").read()
+                ).decode("utf-8")
                 print("TTS Completed")
 
                 asyncio.new_event_loop().run_until_complete(
@@ -131,7 +165,7 @@ if __name__ == "__main__":
                             {
                                 "type": "llm",
                                 "text": chat_completion.choices[0].message.content,
-                                "audio": f"{os.getenv('REALTIME_SERVER_URL')}/{len(history)}.wav",
+                                "audio": "data:audio/wav;base64," + wav_base64,
                             },
                         ),
                     )
@@ -153,14 +187,30 @@ if __name__ == "__main__":
 
         return resampled_audio.astype(np.int16).tobytes()  # type: ignore
 
-    async def echo(websocket, path):
-        print("Client connected")
+    async def echo(websocket):
+        global current_uuid
         global client_websocket
         global history
+
+        if client_websocket:
+            await send_to_client(
+                json.dumps(
+                    {
+                        "type": "disconnect",
+                        "text": "Another client connected, disconnecting...",
+                    },
+                ),
+            )
+            print("Client disconnected", current_uuid)
+            current_uuid = GetUUID()
+        else:
+            print("First client connected", current_uuid)
+
+        print("Client connected", current_uuid)
         history = []
+
         client_websocket = websocket
         async for message in websocket:
-
             if not recorder_ready.is_set():
                 print("Recorder not ready")
                 continue
@@ -171,15 +221,20 @@ if __name__ == "__main__":
             sample_rate = metadata["sampleRate"]
             chunk = message[4 + metadata_length :]
             resampled_chunk = decode_and_resample(chunk, sample_rate, 16000)
-            recorder.feed_audio(resampled_chunk)
+            recorder.feed_audio(resampled_chunk)  # type: ignore
 
     # start_server = websockets.serve(echo, "0.0.0.0", 9001)
     start_server = websockets.serve(echo, "localhost", 8001)
 
-    recorder_thread = threading.Thread(target=recorder_thread)
-    recorder_thread.start()
+    recorder_thread = threading.Thread(target=recorder_thread)  # type: ignore
+    recorder_thread.start()  # type: ignore
     recorder_ready.wait()
 
     print("Server started. Press Ctrl+C to stop the server.")
-    asyncio.get_event_loop().run_until_complete(start_server)
-    asyncio.get_event_loop().run_forever()
+    try:
+        asyncio.get_event_loop().run_until_complete(start_server)
+        asyncio.get_event_loop().run_forever()
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Stopping server...")
+        print("Server stopped.")
+        exit(0)

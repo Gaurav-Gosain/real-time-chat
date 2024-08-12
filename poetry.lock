@@ -7574,6 +7574,16 @@ socks = ["pysocks (>=1.5.6,!=1.5.7,<2.0)"]
 zstd = ["zstandard (>=0.18.0)"]
 
 [[package]]
+name = "uuid"
+version = "1.30"
+description = "UUID object and generation functions (Python 2.3 or higher)"
+optional = false
+python-versions = "*"
+files = [
+    {file = "uuid-1.30.tar.gz", hash = "sha256:1f87cc004ac5120466f36c5beae48b4c48cc411968eed0eaecd3da82aa96193f"},
+]
+
+[[package]]
 name = "wasabi"
 version = "1.1.3"
 description = "A lightweight console printing and formatting toolkit"
@@ -7905,4 +7915,4 @@ multidict = ">=4.0"
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.13"
-content-hash = "a16d581c56aec731e63176418b946a8610923eec2a23497c1765ff289f33e900"
+content-hash = "47d5ee38632fb3338a4df9e7e7390b01b3570f83a7aafd6b15bdb642ac60d370"
